@@ -42,7 +42,7 @@ def _resolve_data_path():
 DATA_PATH = _resolve_data_path()
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.2.3"
+SERVER_VERSION = "0.2.4"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
 CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))
@@ -705,6 +705,26 @@ ALIASES = [
     ("烘干机有焦味", "dryer", "dr_burning_smell"),
     ("蒸烤箱不加热", "steam_oven", "so_no_heat_steam"),
     ("消毒柜不亮", "steam_oven", "so_uv_dead"),
+    # 插入语容忍：用户很少说标准症状名，中间常夹「开一晚上 / 房间还是 / 一直」这类时间与状态词。
+    # 这些短片段只要在问句里连续出现就能整句命中 +70，比靠 LCS 猜更稳；品类内竞争，不会跨类误伤。
+    ("不凉", "air_conditioner", "not_cooling"),
+    ("不冷", "air_conditioner", "not_cooling"),
+    ("不凉快", "air_conditioner", "not_cooling"),
+    ("还是不凉", "air_conditioner", "not_cooling"),
+    ("吹出来不凉", "air_conditioner", "not_cooling"),
+    ("制冷不行", "air_conditioner", "not_cooling"),
+    ("制冷差", "air_conditioner", "not_cooling"),
+    ("开一晚上不凉", "air_conditioner", "not_cooling"),
+    ("不制热", "air_conditioner", "no_heat"),
+    ("吹冷风", "air_conditioner", "no_heat"),
+    ("开不出暖风", "air_conditioner", "no_heat"),
+    ("马桶流水", "faucet_toilet", "toilet_tank_leak"),
+    ("一直流水", "faucet_toilet", "toilet_tank_leak"),
+    ("流水不停", "faucet_toilet", "toilet_tank_leak"),
+    ("水停不下来", "faucet_toilet", "toilet_tank_leak"),
+    ("水箱一直进水", "faucet_toilet", "toilet_tank_leak"),
+    ("冲不干净", "faucet_toilet", "toilet_weak_flush"),
+    ("冲水无力", "faucet_toilet", "toilet_weak_flush"),
 ]
 ALIAS_INDEX = [(_norm(p), c, s) for p, c, s in ALIASES]
 ALIAS_BY_SYM = {}
