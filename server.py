@@ -42,7 +42,7 @@ def _resolve_data_path():
 DATA_PATH = _resolve_data_path()
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.2.5"
+SERVER_VERSION = "0.2.6"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
 CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))
@@ -919,8 +919,12 @@ def t_fix_plan(args):
     """分步解决方案：这是「解决方案」的主体，不只是给原因，给先做什么后做什么。"""
     cat, s = _lookup(args)
     causes = sorted(s.get("causes", []), key=lambda c: -int(c.get("prob_prior", 0) or 0))
-    max_causes = min(int(args.get("max_causes", 3) or 3), MAX_CAUSES)
-    max_steps = min(int(args.get("max_steps", 4) or 4), 10)
+    # 默认给全部：每个症状 4-5 条原因、每条 4-6 步。之前默认 3 条 / 4 步，
+    # 等于每个症状都少掉 1-2 条原因（共 27%）和 1 步动作（共 14%），
+    # 而丢掉的那条往往是概率最低、但"必须找师傅"的那一条。要看全部就全给，
+    # 要省 token 由调用方自己传 max_causes / max_steps 调小。
+    max_causes = min(int(args.get("max_causes", MAX_CAUSES) or MAX_CAUSES), MAX_CAUSES)
+    max_steps = min(int(args.get("max_steps", 10) or 10), 10)
     plan = []
     for c in causes[:max_causes]:
         diff = int(c.get("difficulty", 3) or 3)
@@ -942,6 +946,8 @@ def t_fix_plan(args):
         "symptom_id": s["id"], "symptom_name": s["name"],
         "order_rule": "plan 按动手难度从低到高排：先做不花钱、不用工具的排查，再考虑买件和报修",
         "plan": plan,
+        "causes_total": len(causes),
+        "truncated": len(plan) < len(causes),
         "stop_point": see_pro,
         "risk_class": risk,
         "must_stop_before_diy": bool(see_pro and re.search(r"必须|立即|不要|禁止|停用|找.*师傅|持证", see_pro)),
@@ -965,7 +971,7 @@ TOOLS = [
     },
     {
         "name": "fix_plan",
-        "description": "【解决方案】取某症状的分步方案：按动手难度从低到高排的原因、每步具体动作、需要的配件、安全提示、什么时候必须停手找持牌技师。回答「我该怎么修、先做哪一步」用它。",
+        "description": "【解决方案】取某症状的分步方案：按动手难度从低到高排的原因（默认给全部，通常 4-5 条）、每条原因的全部动作步骤、需要的配件、安全提示、什么时候必须停手找持牌技师。回答「我该怎么修、先做哪一步」用它。要省 token 时才传 max_causes / max_steps 调小。",
         "inputSchema": {
             "type": "object",
             "properties": {
