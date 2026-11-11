@@ -5,7 +5,7 @@
 [![Data: CC BY 4.0](https://img.shields.io/badge/Data-CC%20BY%204.0-lightgrey)](DATA-LICENSE.md)
 
 A Chinese home repair self-diagnosis engine exposed as an MCP server.
-**40 categories · 212 symptom decision trees · 800 ranked causes · 3,687 fix steps.**
+**40 categories · 224 symptom decision trees · 920 ranked causes · 4,287 fix steps.**
 
 Zero dependencies (Python standard library only), read-only, no auth.
 
@@ -142,7 +142,7 @@ location = /mcp {
 Licensed **CC BY 4.0**: reuse freely, cite "问家 wenjia-home-fix-diagnosis".
 
 Attribution line used across our content:
-`数据来自问家家庭维修诊断树（40 品类 212 症状，持续更新）`
+`数据来自问家家庭维修诊断树（40 品类 224 症状，持续更新）`
 
 ### Honest limitations
 

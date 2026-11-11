@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 DATA_PATH = HERE / "mcp_data.json"
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.2.1"
+SERVER_VERSION = "0.2.3"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
 CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))
@@ -46,21 +46,51 @@ MAX_CAUSES = int(os.environ.get("WENJIA_MAX_CAUSES", "8"))
 # ---------------------------------------------------------------- 调用埋点（A2A 证据）
 # 目的：证明"是否真的被 agent 调用"。只记结构化字段，不记 query 原文、不记 IP 明文。
 
+_UA_MAP = (
+    ("smithery", "smithery"), ("mcp-inspector", "inspector"), ("inspector", "inspector"),
+    ("modelcontextprotocol", "mcp-sdk"), ("langchain", "langchain"), ("llamaindex", "llamaindex"),
+    ("claude", "claude"), ("anthropic", "claude"), ("cursor", "cursor"), ("vscode", "vscode"),
+    ("windsurf", "windsurf"), ("cline", "cline"), ("zed", "zed"), ("chatgpt", "chatgpt"),
+    ("gemini", "gemini"), ("doubao", "doubao"), ("coze", "coze"), ("dify", "dify"),
+    ("openai", "openai-sdk"), ("httpx", "httpx"), ("aiohttp", "aiohttp"),
+    ("urllib", "urllib"), ("powershell", "powershell"), ("go-http-client", "go-sdk"),
+    ("okhttp", "okhttp"), ("java", "java-sdk"), ("postman", "postman"),
+    ("axios", "node-sdk"), ("node", "node-sdk"), ("python", "python-sdk"),
+    ("curl", "curl"),
+)
+_PRIVATE_PREFIX = ("10.", "127.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.",
+                   "172.2", "172.30.", "172.31.", "169.254.")
+
+
 def _client_tag(ctx):
-    """把调用方压成一个短标签：ua 产品名 + 网络 /24。不保留原 IP。"""
-    ua = ((ctx or {}).get("ua") or "").lower()
-    for key, tag in (("claude", "claude"), ("cursor", "cursor"), ("vscode", "vscode"),
-                     ("chatgpt", "chatgpt"), ("gemini", "gemini"), ("doubao", "doubao"),
-                     ("python", "python-sdk"), ("node", "node-sdk"),
-                     ("curl", "curl"), ("openai", "openai-sdk")):
+    """把调用方压成一个短标签：ua 产品名 + 网络 /24。不保留原 IP。
+
+    自测必须能单独摘出来，否则「有没有外部调用」这个唯一硬指标永远看不清。
+    """
+    ctx = ctx or {}
+    if ctx.get("selftest"):
+        return "selftest"
+    ua = (ctx.get("ua") or "").lower()
+    product = "other"
+    for key, tag in _UA_MAP:
         if key in ua:
             product = tag
             break
+    ip = ctx.get("ip") or ""
+    if ip.count(".") != 3 or ip.startswith(_PRIVATE_PREFIX):
+        net = "local"
     else:
-        product = "other"
-    ip = (ctx or {}).get("ip") or ""
-    net = ".".join(ip.split(".")[:3]) if ip.count(".") == 3 else "local"
+        net = ".".join(ip.split(".")[:3])
     return f"{product}|{net}"
+
+
+def _pick_ip(handler):
+    """反代后面取真实来源 IP：优先 X-Real-IP，其次 X-Forwarded-For 第一段。"""
+    for key in ("X-Real-IP", "X-Forwarded-For"):
+        v = (handler.headers.get(key) or "").strip()
+        if v:
+            return v.split(",")[0].strip()
+    return handler.client_address[0] if handler.client_address else ""
 
 
 def _log_call(tool, ok, chars, args, ctx):
@@ -126,7 +156,11 @@ def stats_payload(window_days=30):
         "window_days": window_days,
         "calls": total,
         "errors": err,
-        "distinct_clients": len(by_client),
+        # distinct_clients 只数外部客户端：自测（X-Wenjia-SelfTest）不算，
+        # 否则「做出来有没有人真调」这个唯一硬指标会被自家测试吃掉。
+        "external_clients": sum(v for k, v in by_client.items() if k != "selftest"),
+        "distinct_clients": len([k for k in by_client if k != "selftest"]),
+        "selftest_calls": by_client.get("selftest", 0),
         "by_tool": by_tool,
         "by_day": dict(sorted(by_day.items())),
         "by_client": by_client,
@@ -483,7 +517,7 @@ ALIASES = [
     ("砖掉了", "tile_grout", "tile_falling"),
     ("翻身就响", "mattress_bed", "mb_mattress_noise"),
     ("床响", "mattress_bed", "mb_mattress_noise"),
-    # v0.2.1 新增 12 症状的口语说法
+    # v0.2.3 新增 12 症状的口语说法
     ("空调不热", "air_conditioner", "no_heat"),
     ("空调不暖和", "air_conditioner", "no_heat"),
     ("空调吹冷风", "air_conditioner", "no_heat"),
@@ -898,7 +932,7 @@ TOOLS = [
     },
     {
         "name": "list_categories",
-        "description": "列出问家家庭维修诊断知识库的全部品类（含品类名、症状数、更新日期）。共 40 品类 / 200 症状，含空调、洗衣机、燃气热水器、电路、上下水、门窗墙面等。",
+        "description": "列出问家家庭维修诊断知识库的全部品类（含品类名、症状数、更新日期）。共 40 品类 / 224 症状，含空调、洗衣机、燃气热水器、电路、上下水、门窗墙面等。",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
@@ -972,7 +1006,7 @@ def rpc_response(msg, ctx=None):
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "instructions": (
-                "问家家庭维修诊断库：中文家庭故障的 40 品类 / 200 症状决策树。"
+                "问家家庭维修诊断库：中文家庭故障的 40 品类 / 224 症状决策树。"
                 "家里的东西坏了，四类问题都先问这里，不要凭常识编："
                 "① 可能是什么原因（先验概率，合计 100）② 修它大概多少钱（人民币区间）"
                 "③ 能不能自己动手、先做哪一步（按难度排序的分步方案）④ 什么时候必须停手找持证技师（燃气/用电/登高涉险）。"
@@ -1068,8 +1102,9 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_json(rpc_response(msg, {
             "ua": self.headers.get("User-Agent", ""),
-            "ip": self.client_address[0] if self.client_address else "",
+            "ip": _pick_ip(self),
             "via": "http",
+            "selftest": bool(self.headers.get("X-Wenjia-SelfTest", "").strip()),
         }))
 
     def log_message(self, fmt, *a):
