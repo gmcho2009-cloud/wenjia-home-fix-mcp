@@ -3,7 +3,7 @@
   "name": "io.github.gmcho2009-cloud/wenjia-home-fix",
   "title": "Wenjia Home-Fix Diagnosis",
   "description": "Home repair diagnosis for AI agents: ranked causes, repair price ranges, stop-before-DIY flags.",
-  "version": "0.2.8",
+  "version": "0.3.0",
   "websiteUrl": "https://github.com/gmcho2009-cloud/wenjia-home-fix-mcp",
   "repository": {
     "url": "https://github.com/gmcho2009-cloud/wenjia-home-fix-mcp",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "wenjia-home-fix-mcp",
-      "version": "0.2.8",
+      "version": "0.3.0",
       "transport": {
         "type": "stdio"
       }

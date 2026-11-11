@@ -42,7 +42,7 @@ def _resolve_data_path():
 DATA_PATH = _resolve_data_path()
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.2.8"
+SERVER_VERSION = "0.3.0"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
 CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))
@@ -393,6 +393,12 @@ RISK_BY_CATEGORY = {
 }
 STOP_KEYS = ("停用", "停手", "找师傅", "找电工", "不要", "禁止", "必须", "报修", "危险", "断电")
 
+# 危险品类的前置处置：这些是常识级的「现在立刻做什么」，不依赖数据里有没有写。
+URGENT_STOP = {
+    "gas": "闻到燃气味或怀疑漏气：立刻关掉燃气总阀、开窗通风，不要开关任何电器、不要打火、不要抽烟，到室外再联系燃气公司或报修——先别做任何排查。",
+    "electric": "手麻、插座冒烟或有焦味、漏保反复跳闸：先拉总闸再碰任何东西，不要带电拆装、不要反复复位试机。",
+}
+
 
 _PUNCT = "　 \t\n-_/，。？！、：；·（）()\"'“”‘’？"
 
@@ -585,6 +591,13 @@ ALIASES = [
     ("冷冻不结冰", "fridge", "freezer_not_freezing"),
     ("冷冻室不冷", "fridge", "freezer_not_freezing"),
     ("冻不住东西", "fridge", "freezer_not_freezing"),
+    # 「冷冻室 + 结冰」指向的其实是 heavy_frost（结霜结冰严重），
+    # 不能让它落到 freezer_not_freezing（冷冻室不冻）——那是相反方向的故障
+    ("冷冻室结冰", "fridge", "heavy_frost"),
+    ("冷冻室结霜", "fridge", "heavy_frost"),
+    ("冷冻室结了冰", "fridge", "heavy_frost"),
+    ("冷冻室有厚冰", "fridge", "heavy_frost"),
+    ("冷藏室结冰", "fridge", "heavy_frost"),
     ("马桶冲不干净", "faucet_toilet", "toilet_weak_flush"),
     ("马桶冲水没劲", "faucet_toilet", "toilet_weak_flush"),
     ("马桶冲水小", "faucet_toilet", "toilet_weak_flush"),
@@ -595,6 +608,13 @@ ALIASES = [
     ("厕所臭味", "faucet_toilet", "drain_odor"),
     ("卫生间反味", "faucet_toilet", "drain_odor"),
     ("水压小", "faucet_toilet", "low_water_pressure"),
+    # 用户问「换个水龙头多少钱」时，命中的应是水龙头本身，
+    # 不能因为句子里有「卫生间」就落到 drain_odor（下水返味）——那是完全另一件事
+    ("换水龙头", "faucet_toilet", "faucet_drip"),
+    ("更换水龙头", "faucet_toilet", "faucet_drip"),
+    ("换个水龙头", "faucet_toilet", "faucet_drip"),
+    ("换龙头", "faucet_toilet", "faucet_drip"),
+    ("换水龙头多少钱", "faucet_toilet", "faucet_drip"),
     ("水压太低", "faucet_toilet", "low_water_pressure"),
     ("水太小", "faucet_toilet", "low_water_pressure"),
     ("出水很小", "faucet_toilet", "low_water_pressure"),
@@ -949,6 +969,10 @@ def t_stop_check(args):
         t = sent.strip(" ，、")
         if any(k in t for k in STOP_KEYS) and 6 <= len(t) <= 60 and t not in reasons:
             reasons.append(t)
+    # 库里的停手条款都是「做到某一步还不行就找师傅」的事后条款。
+    # 真正危险的场景（闻到燃气味、手麻）需要的是「现在、立刻做什么」，
+    # 库里没有这种句子，只能在这里补——这类处置是常识，不该靠数据里有没有写。
+    reasons = ([URGENT_STOP[risk]] if risk in URGENT_STOP else []) + reasons
     return {
         "category_id": cat["id"], "symptom_id": s["id"], "symptom_name": s["name"],
         "risk_class": risk,
@@ -991,6 +1015,10 @@ def t_fix_plan(args):
         del x["_p"]
     risk = RISK_BY_CATEGORY.get(cat["id"], "general")
     see_pro = s.get("see_pro", "")
+    # 调用方可能跳过 stop_check 直接来取方案。危险品类不能因此漏掉前置处置：
+    # 把那句「现在立刻做什么」放到 stop_point 最前面，调哪个工具都先看见它。
+    if risk in URGENT_STOP:
+        see_pro = URGENT_STOP[risk] + ("　" + see_pro if see_pro else "")
     return {
         "category_id": cat["id"], "category_name": cat["name"],
         "symptom_id": s["id"], "symptom_name": s["name"],
