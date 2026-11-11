@@ -27,6 +27,19 @@ Published on PyPI: <https://pypi.org/project/wenjia-home-fix-mcp/>
 `pip install wenjia-home-fix-mcp` also works. Python >= 3.9, no other dependencies.
 The same file is kept at the repository root as `mcp.json` for catalog crawlers.
 
+### If your pip mirror has not synced yet (China)
+
+Mainland mirrors sync PyPI with a delay. On a mirror-only network, `uvx` may report
+`wenjia-home-fix-mcp was not found in the package registry`. Two ways around it:
+
+```bash
+# 1) point uv at an index that already has it
+UV_DEFAULT_INDEX=https://mirrors.huaweicloud.com/repository/pypi/simple/ uvx wenjia-home-fix-mcp
+
+# 2) install the wheel directly from our host (no index involved)
+pip install http://59.110.26.77/packages/wenjia_home_fix_mcp-0.1.5-py3-none-any.whl
+```
+
 ## What it does
 
 Household failures are hard to describe and hard to fix. This server turns a vague

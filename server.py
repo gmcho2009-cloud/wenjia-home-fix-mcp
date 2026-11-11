@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 DATA_PATH = HERE / "mcp_data.json"
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.1.4"
+SERVER_VERSION = "0.1.5"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
 CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))
@@ -565,6 +565,19 @@ def main_stdio():
         if resp is not None:
             sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
             sys.stdout.flush()
+
+
+def stdio_entry():
+    """MCP 客户端入口（`uvx wenjia-home-fix-mcp` / pip 安装后的同名命令）。
+
+    MCP 客户端的约定是"一行装、用标准输入输出通信"，所以默认走 stdio。
+    要起 HTTP 服务加 --http（生产环境仍用 `python server.py`，行为不变）。
+    早期版本这里默认起 HTTP，导致按 README 配置的客户端连不上——v0.1.5 修正。
+    """
+    if "--http" in sys.argv[1:]:
+        main()
+        return
+    main_stdio()
 
 
 def main():
