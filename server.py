@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 DATA_PATH = HERE / "mcp_data.json"
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.1.6"
+SERVER_VERSION = "0.1.7"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
 CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))

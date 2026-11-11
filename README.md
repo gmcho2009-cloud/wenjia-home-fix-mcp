@@ -27,6 +27,24 @@ Published on PyPI: <https://pypi.org/project/wenjia-home-fix-mcp/>
 `pip install wenjia-home-fix-mcp` also works. Python >= 3.9, no other dependencies.
 The same file is kept at the repository root as `mcp.json` for catalog crawlers.
 
+## Ten tools, entry-first
+
+You do not need to know any id. Pass the user's own words:
+
+| For | Tool |
+|---|---|
+| "空调不凉" "热水器打不着火" → which symptom is this | `find_symptom` |
+| what to do, in what order, when to stop | `fix_plan` |
+| everything a category covers | `get_category` |
+| just the prior probabilities | `prob_distribution` |
+| just the price range | `price_band` |
+| just the stop-before-DIY verdict | `stop_check` |
+| full tree / clarify questions / keyword search | `get_symptom` / `diagnose` / `search_symptoms` |
+
+`category_id` and `symptom_id` accept Chinese names and common colloquial phrasings;
+when resolution fails the error message lists the valid ids so the agent can self-correct
+inside the same turn.
+
 ### If your pip mirror has not synced yet (China)
 
 Mainland mirrors sync PyPI with a delay. On a mirror-only network, `uvx` may report
