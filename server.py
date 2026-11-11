@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -24,9 +25,10 @@ HERE = Path(__file__).resolve().parent
 DATA_PATH = HERE / "mcp_data.json"
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.1.4"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
+CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))
 
 # ---------------------------------------------------------------- 数据加载
 
@@ -39,6 +41,94 @@ for _c in DATA["categories"]:
         SYM_INDEX[(_c["id"], _s["id"])] = _s
 
 MAX_CAUSES = int(os.environ.get("WENJIA_MAX_CAUSES", "8"))
+
+
+# ---------------------------------------------------------------- 调用埋点（A2A 证据）
+# 目的：证明"是否真的被 agent 调用"。只记结构化字段，不记 query 原文、不记 IP 明文。
+
+def _client_tag(ctx):
+    """把调用方压成一个短标签：ua 产品名 + 网络 /24。不保留原 IP。"""
+    ua = ((ctx or {}).get("ua") or "").lower()
+    for key, tag in (("claude", "claude"), ("cursor", "cursor"), ("vscode", "vscode"),
+                     ("chatgpt", "chatgpt"), ("gemini", "gemini"), ("doubao", "doubao"),
+                     ("python", "python-sdk"), ("node", "node-sdk"),
+                     ("curl", "curl"), ("openai", "openai-sdk")):
+        if key in ua:
+            product = tag
+            break
+    else:
+        product = "other"
+    ip = (ctx or {}).get("ip") or ""
+    net = ".".join(ip.split(".")[:3]) if ip.count(".") == 3 else "local"
+    return f"{product}|{net}"
+
+
+def _log_call(tool, ok, chars, args, ctx):
+    rec = {
+        "t": int(time.time()),
+        "tool": tool,
+        "ok": bool(ok),
+        "chars": chars,
+        "client": _client_tag(ctx),
+        "via": (ctx or {}).get("via", "http"),
+    }
+    for k in ("category_id", "symptom_id"):
+        v = args.get(k)
+        if isinstance(v, str) and v:
+            rec[k] = v[:40]
+    try:
+        with open(CALL_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
+def stats_payload(window_days=30):
+    """从 calls.jsonl 现算：总量、按工具、按天、按客户端、热门症状。"""
+    now = time.time()
+    cutoff = now - window_days * 86400
+    total = 0
+    by_tool = {}
+    by_day = {}
+    by_client = {}
+    by_symptom = {}
+    err = 0
+    if CALL_LOG.exists():
+        size = CALL_LOG.stat().st_size
+        if size < 200 * 1024 * 1024:  # 超过 200MB 不再全量扫描，避免拖垮服务
+            with open(CALL_LOG, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if r.get("t", 0) < cutoff:
+                        continue
+                    total += 1
+                    if not r.get("ok"):
+                        err += 1
+                    by_tool[r.get("tool", "?")] = by_tool.get(r.get("tool", "?"), 0) + 1
+                    day = time.strftime("%Y-%m-%d", time.localtime(r.get("t", 0)))
+                    by_day[day] = by_day.get(day, 0) + 1
+                    by_client[r.get("client", "?")] = by_client.get(r.get("client", "?"), 0) + 1
+                    sy = r.get("symptom_id")
+                    if sy:
+                        key = f"{r.get('category_id','?')}/{sy}"
+                        by_symptom[key] = by_symptom.get(key, 0) + 1
+    return {
+        "ok": True,
+        "service": SERVER_NAME,
+        "version": SERVER_VERSION,
+        "window_days": window_days,
+        "calls": total,
+        "errors": err,
+        "distinct_clients": len(by_client),
+        "by_tool": by_tool,
+        "by_day": dict(sorted(by_day.items())),
+        "by_client": by_client,
+        "top_symptoms": dict(sorted(by_symptom.items(), key=lambda kv: -kv[1])[:20]),
+        "log_path": str(CALL_LOG),
+    }
 
 
 # ---------------------------------------------------------------- 工具实现
@@ -337,6 +427,57 @@ TOOL_IMPL = {
 }
 
 
+# ---------------------------------------------------------------- 传输无关的 JSON-RPC 分发
+# 同一份逻辑同时服务 streamable-http（站点）与 stdio（uvx / 魔搭托管）。单一实现，避免两套口径漂移。
+
+def rpc_response(msg, ctx=None):
+    """返回完整响应 dict；通知（无 id）返回 None。ctx 用于埋点（ua / ip / via）。"""
+    method = msg.get("method", "")
+    msg_id = msg.get("id")
+    if msg_id is None:
+        return None
+
+    if method == "initialize":
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            "instructions": (
+                "问家家庭维修诊断知识库。先用 search_symptoms 定位症状，"
+                "再用 diagnose 获取排序后的原因与修复步骤；"
+                "只要概率/价格/停手判断时用 prob_distribution / price_band / stop_check。"
+                "数据 CC BY 4.0，引用请注明来源。"
+            ),
+        }}
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {}}
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": TOOLS}}
+    if method == "tools/call":
+        name = (msg.get("params") or {}).get("name", "")
+        args = (msg.get("params") or {}).get("arguments", {}) or {}
+        fn = TOOL_IMPL.get(name)
+        if fn is None:
+            return {"jsonrpc": "2.0", "id": msg_id,
+                    "error": {"code": -32602, "message": f"unknown tool: {name}"}}
+        try:
+            payload = fn(args)
+            text = json.dumps(payload, ensure_ascii=False)
+            _log_call(name, True, len(text), args, ctx)
+            return {"jsonrpc": "2.0", "id": msg_id, "result": {
+                "content": [{"type": "text", "text": text}],
+                "isError": False,
+            }}
+        except (ValueError, KeyError, TypeError) as e:
+            _log_call(name, False, 0, args, ctx)
+            return {"jsonrpc": "2.0", "id": msg_id, "result": {
+                "content": [{"type": "text", "text": f"参数错误: {e}"}],
+                "isError": True,
+            }}
+    return {"jsonrpc": "2.0", "id": msg_id,
+            "error": {"code": -32601, "message": f"method not found: {method}"}}
+
+
 # ---------------------------------------------------------------- HTTP / JSON-RPC
 
 class Handler(BaseHTTPRequestHandler):
@@ -356,6 +497,17 @@ class Handler(BaseHTTPRequestHandler):
                              "version": SERVER_VERSION,
                              "categories": len(CATS),
                              "symptoms": len(SYM_INDEX)})
+        elif self.path.split("?")[0] in ("/stats", "/mcp/stats"):
+            # nginx 把 /mcp/* 原样转给后端，所以两种前缀都接受
+            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            days = 30
+            for kv in qs.split("&"):
+                if kv.startswith("days="):
+                    try:
+                        days = max(1, min(365, int(kv.split("=", 1)[1])))
+                    except ValueError:
+                        pass
+            self._send_json(stats_payload(days))
         elif self.path == "/mcp":
             # Streamable HTTP: GET 走 SSE 通道；v0.1 无状态，无服务端推送
             self.send_response(405)
@@ -376,67 +528,49 @@ class Handler(BaseHTTPRequestHandler):
                              "error": {"code": -32700, "message": "parse error"}}, 400)
             return
 
-        method = msg.get("method", "")
-        msg_id = msg.get("id")
-        is_notification = msg_id is None
-
-        if is_notification:
+        if msg.get("id") is None:
             # notifications/initialized 等：无状态服务器直接确认 202
             self.send_response(202)
             self.end_headers()
             return
 
-        if method == "initialize":
-            result = {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                "instructions": (
-                    "问家家庭维修诊断知识库。先用 search_symptoms 定位症状，"
-                    "再用 diagnose 获取排序后的原因与修复步骤。数据 CC BY 4.0，"
-                    "引用请注明来源。"
-                ),
-            }
-        elif method == "ping":
-            result = {}
-        elif method == "tools/list":
-            result = {"tools": TOOLS}
-        elif method == "tools/call":
-            name = (msg.get("params") or {}).get("name", "")
-            args = (msg.get("params") or {}).get("arguments", {}) or {}
-            fn = TOOL_IMPL.get(name)
-            if fn is None:
-                self._send_json({
-                    "jsonrpc": "2.0", "id": msg_id,
-                    "error": {"code": -32602,
-                              "message": f"unknown tool: {name}"}}, 200)
-                return
-            try:
-                payload = fn(args)
-                result = {
-                    "content": [{"type": "text",
-                                 "text": json.dumps(payload, ensure_ascii=False)}],
-                    "isError": False,
-                }
-            except (ValueError, KeyError, TypeError) as e:
-                result = {
-                    "content": [{"type": "text", "text": f"参数错误: {e}"}],
-                    "isError": True,
-                }
-        else:
-            self._send_json({
-                "jsonrpc": "2.0", "id": msg_id,
-                "error": {"code": -32601, "message": f"method not found: {method}"}},
-                200)
-            return
-
-        self._send_json({"jsonrpc": "2.0", "id": msg_id, "result": result})
+        self._send_json(rpc_response(msg, {
+            "ua": self.headers.get("User-Agent", ""),
+            "ip": self.client_address[0] if self.client_address else "",
+            "via": "http",
+        }))
 
     def log_message(self, fmt, *a):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % a))
 
 
+def main_stdio():
+    """stdio 传输：给 uvx / 魔搭自定义 MCP 托管 / 本地客户端用。日志只写 stderr，stdout 只走协议。"""
+    sys.stderr.write(f"[OK] {SERVER_NAME} v{SERVER_VERSION} stdio "
+                     f"({len(CATS)} categories / {len(SYM_INDEX)} symptoms)\n")
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0", "id": None,
+                "error": {"code": -32700, "message": "parse error"}},
+                ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+            continue
+        resp = rpc_response(msg, {"via": "stdio", "ua": "stdio", "ip": ""})
+        if resp is not None:
+            sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+
+
 def main():
+    if "--stdio" in sys.argv[1:]:
+        main_stdio()
+        return
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8765"))
     srv = ThreadingHTTPServer((host, port), Handler)
