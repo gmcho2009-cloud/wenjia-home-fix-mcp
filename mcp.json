@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "wenjia-home-fix": {
+      "command": "uvx",
+      "args": [
+        "wenjia-home-fix-mcp"
+      ],
+      "env": {}
+    }
+  }
+}

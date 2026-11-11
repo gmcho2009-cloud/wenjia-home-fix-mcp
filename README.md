@@ -9,6 +9,24 @@ A Chinese home repair self-diagnosis engine exposed as an MCP server.
 
 Zero dependencies (Python standard library only), read-only, no auth.
 
+## Install (stdio, one line)
+
+Published on PyPI: <https://pypi.org/project/wenjia-home-fix-mcp/>
+
+```json
+{
+  "mcpServers": {
+    "wenjia-home-fix": {
+      "command": "uvx",
+      "args": ["wenjia-home-fix-mcp"]
+    }
+  }
+}
+```
+
+`pip install wenjia-home-fix-mcp` also works. Python >= 3.9, no other dependencies.
+The same file is kept at the repository root as `mcp.json` for catalog crawlers.
+
 ## What it does
 
 Household failures are hard to describe and hard to fix. This server turns a vague
