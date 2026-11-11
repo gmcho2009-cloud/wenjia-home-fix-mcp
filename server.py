@@ -42,7 +42,7 @@ def _resolve_data_path():
 DATA_PATH = _resolve_data_path()
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.2.6"
+SERVER_VERSION = "0.2.7"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
 CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))
@@ -937,14 +937,17 @@ def t_fix_plan(args):
             "parts": c.get("parts", []),
             "safety": c.get("safety", ""),
         })
-    # 按动手难度升序：先排除不用买件、不用工具的，再考虑花钱的
-    plan.sort(key=lambda x: (x["difficulty"], -x["prob_pct"]))
+    # 按概率降序排：用户问「为什么不凉」，他要的是「最可能是什么」。
+    # 之前按动手难度优先排，导致 54/224 个症状把低概率的那条摆在第一位
+    # （空调内机漏水先让人查滤网 20%，其实是排水管堵 40%），用户照做一次就白干了。
+    # 「先做便宜的排查」这个逻辑交给调用方：difficulty 字段就在旁边，1-2 是他自己能做的。
+    plan.sort(key=lambda x: (-x["prob_pct"], x["difficulty"]))
     risk = RISK_BY_CATEGORY.get(cat["id"], "general")
     see_pro = s.get("see_pro", "")
     return {
         "category_id": cat["id"], "category_name": cat["name"],
         "symptom_id": s["id"], "symptom_name": s["name"],
-        "order_rule": "plan 按动手难度从低到高排：先做不花钱、不用工具的排查，再考虑买件和报修",
+        "order_rule": "plan 按原因的先验概率从高到低排：第一条就是最可能的原因。概率相同时动手难度低的在前。difficulty 1-2 表示用户自己能做，3 以上建议找师傅——先讲最可能的，再按难度决定是自己动手还是报修。",
         "plan": plan,
         "causes_total": len(causes),
         "truncated": len(plan) < len(causes),
@@ -971,7 +974,7 @@ TOOLS = [
     },
     {
         "name": "fix_plan",
-        "description": "【解决方案】取某症状的分步方案：按动手难度从低到高排的原因（默认给全部，通常 4-5 条）、每条原因的全部动作步骤、需要的配件、安全提示、什么时候必须停手找持牌技师。回答「我该怎么修、先做哪一步」用它。要省 token 时才传 max_causes / max_steps 调小。",
+        "description": "【解决方案】取某症状的分步方案：原因按先验概率从高到低排（第一条就是最可能的，默认给全部，通常 4-5 条），每条带全部动作步骤、需要的配件、安全提示、什么时候必须停手找持牌技师。回答「我该怎么修、最可能是什么、先做哪一步」用它。要省 token 时才传 max_causes / max_steps 调小。",
         "inputSchema": {
             "type": "object",
             "properties": {
