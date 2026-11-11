@@ -48,15 +48,17 @@ inside the same turn.
 ### If your pip mirror has not synced yet (China)
 
 Mainland mirrors sync PyPI with a delay. On a mirror-only network, `uvx` may report
-`wenjia-home-fix-mcp was not found in the package registry`. Two ways around it:
+`wenjia-home-fix-mcp was not found in the package registry`. Two ways around it,
+both verified against 0.2.3:
 
 ```bash
-# 1) point uv at an index that already has it
-UV_DEFAULT_INDEX=https://mirrors.huaweicloud.com/repository/pypi/simple/ uvx wenjia-home-fix-mcp
+# 1) point uv straight at the official index (mirror config is ignored)
+uvx --default-index https://pypi.org/simple wenjia-home-fix-mcp
 
 # 2) install the wheel directly from our host (no index involved)
-pip install http://59.110.26.77/packages/wenjia_home_fix_mcp-0.1.5-py3-none-any.whl
+pip install http://59.110.26.77/packages/wenjia_home_fix_mcp-0.2.3-py3-none-any.whl
 ```
+
 
 ## What it does
 
