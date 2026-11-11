@@ -2,17 +2,21 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.gmcho2009-cloud/wenjia-home-fix",
   "title": "Wenjia Home-Fix Diagnosis",
-  "description": "Chinese home repair self-diagnosis engine: 40 categories, 200 symptom decision trees. Returns clarifying questions, causes ranked by prior probability, step-by-step fixes ordered by safety, parts prices, and when to call a professional. Read-only, no auth. Includes atomic tools prob_distribution / price_band / stop_check for agent-to-agent calls. Data CC BY 4.0.",
-  "version": "0.1.5",
-  "websiteUrl": "https://wenjia.net/dataset.html",
+  "description": "Home repair diagnosis for AI agents: ranked causes, repair price ranges, stop-before-DIY flags.",
+  "version": "0.1.6",
+  "websiteUrl": "https://github.com/gmcho2009-cloud/wenjia-home-fix-mcp",
   "repository": {
     "url": "https://github.com/gmcho2009-cloud/wenjia-home-fix-mcp",
     "source": "github"
   },
-  "remotes": [
+  "packages": [
     {
-      "type": "streamable-http",
-      "url": "https://wenjia.net/mcp"
+      "registryType": "pypi",
+      "identifier": "wenjia-home-fix-mcp",
+      "version": "0.1.6",
+      "transport": {
+        "type": "stdio"
+      }
     }
   ]
 }
