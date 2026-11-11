@@ -1,7 +1,6 @@
 {
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": [
-    {
-      "name": "gmcho2009-cloud"
-    }
+    "gmcho2009-cloud"
   ]
 }
