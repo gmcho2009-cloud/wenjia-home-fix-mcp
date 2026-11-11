@@ -22,7 +22,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DATA_PATH = HERE / "mcp_data.json"
+
+
+def _resolve_data_path():
+    """数据文件位置随分发形态不同：pip 包内同目录，public repo 里在 data/ 下。
+
+    WENJIA_DATA 显式指定优先（容器/自定义部署用），否则按候选路径顺序找第一个存在的，
+    都不存在时回落到同目录名，让报错信息指向最可能的位置而不是误导性的相对路径。
+    """
+    env = os.environ.get("WENJIA_DATA", "").strip()
+    if env:
+        return Path(env).expanduser()
+    for cand in (HERE / "mcp_data.json", HERE / "data" / "mcp_data.json"):
+        if cand.exists():
+            return cand
+    return HERE / "mcp_data.json"
+
+
+DATA_PATH = _resolve_data_path()
 
 SERVER_NAME = "wenjia-home-fix"
 SERVER_VERSION = "0.2.3"
@@ -158,7 +175,7 @@ def stats_payload(window_days=30):
         "errors": err,
         # distinct_clients 只数外部客户端：自测（X-Wenjia-SelfTest）不算，
         # 否则「做出来有没有人真调」这个唯一硬指标会被自家测试吃掉。
-        "external_clients": sum(v for k, v in by_client.items() if k != "selftest"),
+        "external_calls": sum(v for k, v in by_client.items() if k != "selftest"),
         "distinct_clients": len([k for k in by_client if k != "selftest"]),
         "selftest_calls": by_client.get("selftest", 0),
         "by_tool": by_tool,
@@ -571,6 +588,69 @@ ALIASES = [
     ("指纹锁打不开", "smart_lock", "fingerprint_fail"),
     ("指纹打不开", "smart_lock", "fingerprint_fail"),
     ("指纹识别不了", "smart_lock", "fingerprint_fail"),
+    # 第二批缺口 12 条的口语说法
+    ("洗衣机报错", "washing_machine", "error_code"),
+    ("洗衣机显示代码", "washing_machine", "error_code"),
+    ("洗衣机洗到一半停了", "washing_machine", "error_code"),
+    ("洗衣机中途停止", "washing_machine", "error_code"),
+    ("洗衣机门边发霉", "washing_machine", "door_seal_mold"),
+    ("洗衣机胶圈发霉", "washing_machine", "door_seal_mold"),
+    ("洗衣机门口漏水", "washing_machine", "door_seal_mold"),
+    ("洗衣机门圈发黑", "washing_machine", "door_seal_mold"),
+    ("冰箱门关不严", "fridge", "door_seal"),
+    ("冰箱门吸不住", "fridge", "door_seal"),
+    ("冰箱门封条不严", "fridge", "door_seal"),
+    ("冰箱门漏冷", "fridge", "door_seal"),
+    ("灶台玻璃碎了", "gas_stove", "glass_panel_crack"),
+    ("灶台面板炸了", "gas_stove", "glass_panel_crack"),
+    ("燃气灶玻璃裂了", "gas_stove", "glass_panel_crack"),
+    ("灶具面板碎了", "gas_stove", "glass_panel_crack"),
+    ("马桶底座漏水", "faucet_toilet", "toilet_base_leak"),
+    ("马桶下面渗水", "faucet_toilet", "toilet_base_leak"),
+    ("马桶底部渗水", "faucet_toilet", "toilet_base_leak"),
+    ("马桶底座渗水", "faucet_toilet", "toilet_base_leak"),
+    ("水管冻了", "faucet_toilet", "pipe_freeze"),
+    ("水管冻住", "faucet_toilet", "pipe_freeze"),
+    ("水管冻裂", "faucet_toilet", "pipe_freeze"),
+    ("冬天水管不出水", "faucet_toilet", "pipe_freeze"),
+    ("水表自转", "faucet_toilet", "meter_self_spin"),
+    ("不用水水表在转", "faucet_toilet", "meter_self_spin"),
+    ("水表一直在转", "faucet_toilet", "meter_self_spin"),
+    ("水表转个不停", "faucet_toilet", "meter_self_spin"),
+    ("水管异响", "faucet_toilet", "water_hammer"),
+    ("水锤", "faucet_toilet", "water_hammer"),
+    ("关水龙头咣当", "faucet_toilet", "water_hammer"),
+    ("管子咚咚响", "faucet_toilet", "water_hammer"),
+    ("摸电器麻手", "home_circuit", "electric_shock"),
+    ("电器外壳带电", "home_circuit", "electric_shock"),
+    ("摸水龙头麻", "home_circuit", "electric_shock"),
+    ("感觉家里漏电", "home_circuit", "electric_shock"),
+    ("插头有麻手感", "home_circuit", "electric_shock"),
+    ("家里有烧焦味", "home_circuit", "burnt_smell"),
+    ("闻到焦味找不到", "home_circuit", "burnt_smell"),
+    ("插头发烫", "home_circuit", "burnt_smell"),
+    ("配电箱有焦味", "home_circuit", "burnt_smell"),
+    ("热水器不出热水", "gas_water_heater", "no_hot_water"),
+    ("燃气热水器水不热", "gas_water_heater", "no_hot_water"),
+    ("热水器水是凉的", "gas_water_heater", "no_hot_water"),
+    ("油烟机不转", "range_hood", "motor_dead"),
+    ("油烟机不启动", "range_hood", "motor_dead"),
+    ("油烟机风扇不转", "range_hood", "motor_dead"),
+    ("油烟机按了没反应", "range_hood", "motor_dead"),
+    # 交叉冲突专用：把易混的两组强行拉开
+    ("打不着火", "gas_water_heater", "no_ignition"),
+    ("点不着火", "gas_water_heater", "no_ignition"),
+    ("热水器打不火", "gas_water_heater", "no_ignition"),
+    ("洗完衣服一股臭味", "washing_machine", "odor"),
+    ("洗完衣服有馊味", "washing_machine", "odor"),
+    ("衣服洗完臭味", "washing_machine", "odor"),
+    ("脱水时跳起来", "washing_machine", "violent_vibration"),
+    ("洗衣机跳起来", "washing_machine", "violent_vibration"),
+    ("洗衣机跳舞", "washing_machine", "violent_vibration"),
+    ("麻手", "home_circuit", "electric_shock"),
+    ("外壳麻", "home_circuit", "electric_shock"),
+    ("冰箱麻手", "home_circuit", "electric_shock"),
+    ("有麻手感", "home_circuit", "electric_shock"),
     ("烟感一直叫", "safety_alarm", "sa_false_alarm"),
     ("烟感滴滴响", "safety_alarm", "sa_chirping"),
     ("淋浴房玻璃裂", "shower_room", "sr_glass_burst"),
@@ -630,6 +710,12 @@ ALIAS_INDEX = [(_norm(p), c, s) for p, c, s in ALIASES]
 ALIAS_BY_SYM = {}
 for _pn, _c, _s in ALIAS_INDEX:
     ALIAS_BY_SYM.setdefault((_c, _s), []).append(_pn)
+# 别名也要过同一套口语清洗：问句被 _qnorm 剥掉「着 / 了 / 的」之后，
+# 原文里带这些字的别名就再也对不上了 —— 必须同时收录清洗后的形态。
+for _pn, _c, _s in ALIAS_INDEX:
+    _qn = _qnorm(_pn)
+    if _qn and _qn != _pn:
+        ALIAS_BY_SYM.setdefault((_c, _s), []).append(_qn)
 
 
 def _lcs(a, b, cap=6):
