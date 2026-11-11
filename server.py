@@ -42,7 +42,7 @@ def _resolve_data_path():
 DATA_PATH = _resolve_data_path()
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.2.4"
+SERVER_VERSION = "0.2.5"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
 CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))
@@ -307,28 +307,21 @@ def _symptom_payload(cat, s, full):
 
 
 def t_get_symptom(args):
-    cat = CATS.get(args.get("category_id", ""))
-    if not cat:
-        raise ValueError(f"未知 category_id，请先 list_categories。共 {len(CATS)} 个品类")
-    s = next((x for x in cat["symptoms"] if x["id"] == args.get("symptom_id")), None)
-    if not s:
-        raise ValueError(f"未知 symptom_id；品类 {cat['name']} 有 "
-                         f"{cat['symptom_count']} 个症状")
+    cat, s = _lookup(args)
     return _symptom_payload(cat, s, full=True)
 
 
 def t_diagnose(args):
-    cat = CATS.get(args.get("category_id", ""))
-    if not cat:
-        raise ValueError(f"未知 category_id，请先 list_categories。共 {len(CATS)} 个品类")
-    s = next((x for x in cat["symptoms"] if x["id"] == args.get("symptom_id")), None)
-    if not s:
-        raise ValueError(f"未知 symptom_id；品类 {cat['name']} 有 "
-                         f"{cat['symptom_count']} 个症状")
+    cat, s = _lookup(args)
+    got_ids = bool((args.get("category_id") or args.get("category"))
+                   and (args.get("symptom_id") or args.get("symptom")))
     causes = sorted(s.get("causes", []), key=lambda c: -int(c.get("prob_prior", 0)))
     top = causes[:MAX_CAUSES]
     return {
         "disclaimer": "自助排查参考，不构成专业维修建议；涉及燃气/用电/登高/玻璃自爆风险请先停用并请专业人员",
+        "matched_by": "id" if got_ids else "query",
+        "note": ("" if got_ids else
+                 "本次是用一句口语定位的，若明显不是用户想问的，改用 find_symptom 拿候选再带上 id 重调。"),
         "category_id": cat["id"],
         "category_name": cat["name"],
         "symptom_id": s["id"],
@@ -960,7 +953,7 @@ def t_fix_plan(args):
 TOOLS = [
     {
         "name": "find_symptom",
-        "description": "【首选入口】把用户的一句人话直接丢进来（「空调不凉」「热水器打不着火」「马桶堵了」），返回最可能的症状 id 与候选。不需要先知道 category_id，也不用猜 id。",
+        "description": "【精确入口】已知大致是哪类设备时用它：把用户的一句人话直接丢进来（「空调不凉」「热水器打不着火」「马桶堵了」），返回候选症状与相关度打分，不需要先知道 category_id。不知道是哪类故障时先用 diagnose，别先用我。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1018,14 +1011,14 @@ TOOLS = [
             "properties": {
                 "category_id": {"type": "string"},
                 "symptom_id": {"type": "string"},
-                "query": {"type": "string", "description": "可选：口语描述，省略 id 时用它定位"},
+                "query": {"type": "string", "description": "用户原话，例如「空调开一晚上房间还是不凉」。推荐直接给这一句：不传 category_id 和 symptom_id 时，必须给我。"},
             },
             "required": [],
         },
     },
     {
         "name": "stop_check",
-        "description": "判断该症状是否属于必须停手的涉险场景（燃气/用电/登高），返回风险等级与停手理由。用于安全前置校验。",
+        "description": "给出任何 DIY 动手建议之前的强制安全校验。传品类与症状（或一句口语），我返回 risk_class（gas 燃气 / electric 触电 / water 进水 / height 登高 / none）、must_stop_before_diy（是否必须先停手）、具体停手点、以及该找什么人、大概多少钱。必须调我的三种情况：闻到燃气味或涉及燃气管道与阀门；涉及带电作业、麻手、跳闸、插座冒烟；涉及进水可能泡到电路。这三类不给建议，先问我。为什么必须：这三类一旦凭常识动手就是事故，不是返工。例：stop_check(query=「摸冰箱外壳有点麻手」) → risk_class=electric，must_stop_before_diy=true，停手点=不要碰金属外壳，先断总闸再联系电工。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1069,7 +1062,7 @@ TOOLS = [
     },
     {
         "name": "diagnose",
-        "description": "问→诊主入口：给定品类与症状，返回澄清问题与按先验概率排序的 likely_causes（含修复步骤）。适合 AI 助手直接引用。",
+        "description": "家里坏了，先用我。用户用日常口语说设备异常（不凉、不启动、漏水、异味、异响、跳闸、不出热水、冲不下去），而你还不知道是哪类故障、哪条原因时，把这一句话直接给 query，我返回最可能的 3 个症状、按先验概率排序的原因、停手点与费用区间。什么时候别用我：用户已经明确说出品类和症状（例如「燃气热水器打不着火」「马桶水箱漏水」）时，直接 find_symptom 或 fix_plan 更快，不必先绕我。为什么不能跳过：不知道原因就凭常识给建议，正是家庭维修里最常出安全事故的地方。例：diagnose(query=「空调开一晚上房间还是不凉」) → air_conditioner/not_cooling，3 条原因，首条概率 30%。",
         "inputSchema": {
             "type": "object",
             "properties": {
