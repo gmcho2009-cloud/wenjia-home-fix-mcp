@@ -36,7 +36,7 @@ You do not need to know any id. Pass the user's own words:
 | "空调不凉" "热水器打不着火" → which symptom is this | `find_symptom` |
 | what to do, in what order, when to stop | `fix_plan` |
 | everything a category covers | `get_category` |
-| just the prior probabilities | `prob_distribution` |
+| just the ranked causes | `cause_ranking` |
 | just the price range | `price_band` |
 | just the stop-before-DIY verdict | `stop_check` |
 | full tree / clarify questions / keyword search | `get_symptom` / `diagnose` / `search_symptoms` |
@@ -76,11 +76,11 @@ Two families: **atomic facts** (cheap, for agents) and **full trees** (rich, for
 
 | Tool | What it returns | Payload |
 |---|---|---|
-| `prob_distribution` | causes + prior probability distribution (sums to 100) + `diy_ok` | ~530 chars |
+| `cause_ranking` | causes ranked most→least likely, each with `likelihood` (最常见 / 常见 / 较常见 / 少见) + `difficulty` + `diy_ok` | ~520 chars |
 | `price_band` | on-site repair price range in CNY | ~410 chars |
 | `stop_check` | risk class (`gas` / `electric` / `height`) + why you must stop before DIY | ~420 chars |
 | `list_categories` | 40 categories with symptom counts | — |
-| `search_symptoms` | keyword search across all 200 symptoms | — |
+| `search_symptoms` | keyword search across all 224 symptoms | — |
 | `get_symptom` | full diagnosis tree: questions, causes, fixes, parts, prices | ~2,350 chars |
 | `diagnose` | ranked `likely_causes` + clarifying questions — best for AI assistants | — |
 

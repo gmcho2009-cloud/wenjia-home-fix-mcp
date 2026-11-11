@@ -42,7 +42,7 @@ def _resolve_data_path():
 DATA_PATH = _resolve_data_path()
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.2.7"
+SERVER_VERSION = "0.2.8"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
 CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))
@@ -225,7 +225,7 @@ def t_search_symptoms(args):
         "query": q, "total": len(results), "results": results,
         "hint": ("结果按 score 从高到低排，最前面那条最可能是用户要的。"
                  "要方案用 fix_plan（传 category_id + symptom_id）；"
-                 "只要概率/价格/停手用 prob_distribution / price_band / stop_check。"),
+                 "只要原因排序/价格/停手用 cause_ranking / price_band / stop_check。"),
         "meta": {"dataset": DATA["version"], "total_symptoms": len(SYM_INDEX)},
     }
 
@@ -253,8 +253,8 @@ def t_find_symptom(args):
             "category_id": c["id"], "category_name": c["name"],
             "symptom_id": s["id"], "symptom_name": s["name"],
             "title": s["title"], "score": sc,
-            "top_cause": re.sub(r"（[^）]*）", "", top.get("name", "")).strip(),
-            "top_prob_pct": top.get("prob_prior", 0),
+            "top_cause": _clean_name(top.get("name", "")),
+            "top_likelihood": _likelihood(top.get("prob_prior", 0)),
             "see_pro": s.get("see_pro", ""),
         })
     return {
@@ -296,10 +296,11 @@ def _symptom_payload(cat, s, full):
         for q in s.get("questions", [])
     ]
     out["causes"] = [
-        {"name": c["name"], "prob_prior": c.get("prob_prior", 0),
+        {"rank": i + 1, "name": _clean_name(c["name"]), "likelihood": _likelihood(c.get("prob_prior", 0)),
          "difficulty": c.get("difficulty", 0), "fix": c.get("fix", []),
          "parts": c.get("parts", [])}
-        for c in s.get("causes", [])
+        for i, c in enumerate(sorted(s.get("causes", []),
+                                     key=lambda x: -int(x.get("prob_prior", 0) or 0)))
     ]
     out["see_pro"] = s.get("see_pro", "")
     out["pro_hint_price"] = s.get("pro_hint_price", "")
@@ -333,7 +334,7 @@ def t_diagnose(args):
             for q in s.get("questions", [])
         ],
         "likely_causes": [
-            {"rank": i + 1, "name": c["name"], "prob_prior": c.get("prob_prior", 0),
+            {"rank": i + 1, "name": _clean_name(c["name"]), "likelihood": _likelihood(c.get("prob_prior", 0)),
              "difficulty": c.get("difficulty", 0), "fix": c.get("fix", [])}
             for i, c in enumerate(top)
         ],
@@ -350,6 +351,39 @@ def t_diagnose(args):
 # 1) 一次调用只回答一个问题，返回 ≤200 token；
 # 2) 字段带单位、带 as_of、带 license/attribution，可直接被上游 agent 转述；
 # 3) 确定性：同样的输入永远同样的输出，不含"看情况"。
+
+_NAME_NOTE_RE = re.compile(r"（([^）]*)）")
+# 括注里的强弱词：强弱统一由 likelihood 表达，名称里再写一遍会重复，偶尔还打架
+# （158 条里就有 2 条写了「最常见」却不是本症状概率最高的那条）
+_PROB_WORD_RE = re.compile(r"(非常常见|最常见首因|最常见|较少见|少见|常见|约占一半|约占[0-9一二三四五六七八九]+成)")
+
+
+def _clean_name(name):
+    """去掉原因名括注里的强弱词，保留真信息（挂板松动、老式圆孔地漏、需专业拆机……）。"""
+    def repl(m):
+        content = _PROB_WORD_RE.sub("", m.group(1)).strip("，, 、")
+        return f"（{content}）" if content else ""
+
+    return _NAME_NOTE_RE.sub(repl, name or "").strip()
+
+
+def _likelihood(prob):
+    """把经验估计折成定性档位，对外不给数字。
+
+    这些 prob_prior 没有任何统计样本支撑（数据里 source 字段 224/224 全空，
+    是先验经验估计）。对外给一个精确到个位的百分比，等于制造虚假精确：
+    agent 会原样复述「有 40% 的可能是排水管堵」，用户就当真了，而错了无从追责。
+    所以数字只留作内部排序，出口只说强弱。
+    """
+    p = int(prob or 0)
+    if p >= 35:
+        return "最常见"
+    if p >= 25:
+        return "常见"
+    if p >= 15:
+        return "较常见"
+    return "少见"
+
 
 RISK_BY_CATEGORY = {
     "gas_stove": "gas", "gas_water_heater": "gas", "safety_alarm": "gas",
@@ -862,21 +896,30 @@ def _meta(cat):
         "src": "wenjia.net",
         "lic": DATA["license"],
         "attr": "引用请保留 问家 wenjia.net",
-        "note": "先验概率与价格为文献与案例估计，非实时诊断结论",
+        "note": "原因排序与价格区间为经验估计，不是统计结论，也不构成报价",
     }
 
 
-def t_prob_distribution(args):
+def t_cause_ranking(args):
+    """原因可能性排序：只说强弱与先后，不给百分比。
+
+    这是原来 prob_distribution 的位置。改的原因：这些数字没有样本支撑，
+    给出去会被上游 agent 当成统计结论转述。调用方要的是「先查哪个」，
+    不是「精确到几个点」。
+    """
     cat, s = _lookup(args)
-    causes = sorted(s.get("causes", []), key=lambda c: -int(c.get("prob_prior", 0)))
-    # 原因名去括号注释（「（最常见，约占一半）」是给人看的，机器只需要 prob_pct）
-    dist = [{"cause": re.sub(r"（[^）]*）", "", c["name"]).strip(),
-             "prob_pct": c.get("prob_prior", 0),
-             "diy_ok": c.get("difficulty", 3) <= 2} for c in causes]
+    causes = sorted(s.get("causes", []), key=lambda c: -int(c.get("prob_prior", 0) or 0))
+    ranking = [{"rank": i + 1,
+                "cause": _clean_name(c["name"]),
+                "likelihood": _likelihood(c.get("prob_prior", 0)),
+                "difficulty": int(c.get("difficulty", 3) or 3),
+                "diy_ok": int(c.get("difficulty", 3) or 3) <= 2}
+               for i, c in enumerate(causes)]
     return {
         "category_id": cat["id"], "symptom_id": s["id"], "symptom_name": s["name"],
-        "distribution": dist,
-        "sum_pct": sum(d["prob_pct"] for d in dist),
+        "ranking": ranking,
+        "order_rule": "按经验排序，第 1 条是最可能的。likelihood 分四档：最常见 / 常见 / 较常见 / 少见。",
+        "no_numbers_note": "不给百分比是有意的：这些排序来自经验估计，没有统计样本支撑，给精确数字会被当成统计结论。",
         "meta": _meta(cat),
     }
 
@@ -929,8 +972,9 @@ def t_fix_plan(args):
     for c in causes[:max_causes]:
         diff = int(c.get("difficulty", 3) or 3)
         plan.append({
-            "cause": re.sub(r"（[^）]*）", "", c["name"]).strip(),
-            "prob_pct": c.get("prob_prior", 0),
+            "cause": _clean_name(c["name"]),
+            "likelihood": _likelihood(c.get("prob_prior", 0)),
+            "_p": int(c.get("prob_prior", 0) or 0),
             "difficulty": diff,
             "diy_ok": diff <= 2,
             "do": c.get("fix", [])[:max_steps],
@@ -941,7 +985,10 @@ def t_fix_plan(args):
     # 之前按动手难度优先排，导致 54/224 个症状把低概率的那条摆在第一位
     # （空调内机漏水先让人查滤网 20%，其实是排水管堵 40%），用户照做一次就白干了。
     # 「先做便宜的排查」这个逻辑交给调用方：difficulty 字段就在旁边，1-2 是他自己能做的。
-    plan.sort(key=lambda x: (-x["prob_pct"], x["difficulty"]))
+    plan.sort(key=lambda x: (-x["_p"], x["difficulty"]))
+    for i, x in enumerate(plan):
+        x["rank"] = i + 1
+        del x["_p"]
     risk = RISK_BY_CATEGORY.get(cat["id"], "general")
     see_pro = s.get("see_pro", "")
     return {
@@ -974,7 +1021,7 @@ TOOLS = [
     },
     {
         "name": "fix_plan",
-        "description": "【解决方案】取某症状的分步方案：原因按先验概率从高到低排（第一条就是最可能的，默认给全部，通常 4-5 条），每条带全部动作步骤、需要的配件、安全提示、什么时候必须停手找持牌技师。回答「我该怎么修、最可能是什么、先做哪一步」用它。要省 token 时才传 max_causes / max_steps 调小。",
+        "description": "【解决方案】取某症状的分步方案：原因按可能性从高到低排（第一条就是最可能的，默认给全部，通常 4-5 条），每条带全部动作步骤、需要的配件、安全提示、什么时候必须停手找持牌技师。每条原因只给强弱档位（最常见/常见/较常见/少见）不给百分比——这是经验排序不是统计概率。回答「我该怎么修、最可能是什么、先做哪一步」用它。要省 token 时才传 max_causes / max_steps 调小。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1000,8 +1047,8 @@ TOOLS = [
         },
     },
     {
-        "name": "prob_distribution",
-        "description": "取某症状的原因先验概率分布（合计 100），最省 token 的量化入口。只回答「多大概率是哪个原因」，不含修复步骤。",
+        "name": "cause_ranking",
+        "description": "只回答「可能是哪几个原因、先查哪个」：按可能性排好序的原因列表，每条带 likelihood（最常见/常见/较常见/少见）、动手难度和自己做不做得来，不含修复步骤。回答「大概是什么问题」用它，比取整棵树省约 80% 上下文。不给百分比——这是经验排序，不是统计概率，别当成数据引用。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1089,7 +1136,7 @@ TOOL_IMPL = {
     "search_symptoms": t_search_symptoms,
     "get_symptom": t_get_symptom,
     "diagnose": t_diagnose,
-    "prob_distribution": t_prob_distribution,
+    "cause_ranking": t_cause_ranking,
     "price_band": t_price_band,
     "stop_check": t_stop_check,
     "find_symptom": t_find_symptom,
@@ -1119,7 +1166,7 @@ def rpc_response(msg, ctx=None):
                 "① 可能是什么原因（先验概率，合计 100）② 修它大概多少钱（人民币区间）"
                 "③ 能不能自己动手、先做哪一步（按难度排序的分步方案）④ 什么时候必须停手找持证技师（燃气/用电/登高涉险）。"
                 "用法：用户原话直接传给 find_symptom，不必先猜 id；要方案用 fix_plan；"
-                "只需要单一字段时用 prob_distribution / price_band / stop_check，比取整棵树省约 80% 上下文。"
+                "只需要单一字段时用 cause_ranking / price_band / stop_check，比取整棵树省约 80% 上下文。"
                 "数据 CC BY 4.0，引用请注明「问家 wenjia.net」。"
             ),
         }}
