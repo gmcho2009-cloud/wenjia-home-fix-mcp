@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 DATA_PATH = HERE / "mcp_data.json"
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.2.1"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
 CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))
@@ -483,7 +483,7 @@ ALIASES = [
     ("砖掉了", "tile_grout", "tile_falling"),
     ("翻身就响", "mattress_bed", "mb_mattress_noise"),
     ("床响", "mattress_bed", "mb_mattress_noise"),
-    # v0.2.0 新增 12 症状的口语说法
+    # v0.2.1 新增 12 症状的口语说法
     ("空调不热", "air_conditioner", "no_heat"),
     ("空调不暖和", "air_conditioner", "no_heat"),
     ("空调吹冷风", "air_conditioner", "no_heat"),
