@@ -1,0 +1,22 @@
+[Unit]
+Description=Wenjia MCP Server (home-fix diagnosis knowledge engine)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/wenjia-mcp
+ExecStart=/usr/bin/python3 /opt/wenjia-mcp/server.py
+Environment=PORT=8765
+Environment=HOST=127.0.0.1
+Restart=always
+RestartSec=3
+# 加固：只读文件系统 + 无新权限
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/wenjia-mcp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
