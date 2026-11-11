@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 DATA_PATH = HERE / "mcp_data.json"
 
 SERVER_NAME = "wenjia-home-fix"
-SERVER_VERSION = "0.1.7"
+SERVER_VERSION = "0.1.8"
 PROTOCOL_VERSION = "2025-06-18"
 DATASET_URL = "http://59.110.26.77/"  # 备案通过后切换为 https://wenjia.net/
 CALL_LOG = Path(os.environ.get("WENJIA_CALL_LOG", str(HERE / "calls.jsonl")))
@@ -76,6 +76,10 @@ def _log_call(tool, ok, chars, args, ctx):
         v = args.get(k)
         if isinstance(v, str) and v:
             rec[k] = v[:40]
+    # 只在失败时留 query：用来补别名、补症状，成功的调用不留原话
+    if not ok and isinstance(args.get("query"), str) and args["query"]:
+        rec["q"] = args["query"][:40]
+        rec["miss"] = 1
     try:
         with open(CALL_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -150,28 +154,78 @@ def t_list_categories(args):
 
 
 def t_search_symptoms(args):
-    q = (args.get("query") or "").strip().lower().replace(" ", "").replace("　", "")
-    if not q:
-        raise ValueError("query 不能为空")
+    q = args.get("query") or ""
+    if not _norm(q):
+        raise ValueError("query 不能为空，例如「不制冷」「漏水」「异响」，也可以直接给一句口语")
     cat_filter = args.get("category_id")
+    if cat_filter:
+        c = _find_cat(cat_filter)
+        if not c:
+            raise ValueError(f"没认出品类「{cat_filter}」")
+        cat_filter = c["id"]
     limit = min(int(args.get("limit", 20)), 50)
-    hits = []
-    for c in DATA["categories"]:
-        if cat_filter and c["id"] != cat_filter:
-            continue
-        for s in c["symptoms"]:
-            hay = f"{s['id']} {s['name']} {s['title']}".lower().replace(" ", "")
-            if q in hay.lower():
-                hits.append({
-                    "category_id": c["id"], "category_name": c["name"],
-                    "symptom_id": s["id"], "symptom_name": s["name"],
-                    "title": s["title"],
-                })
-                if len(hits) >= limit:
-                    break
-        if len(hits) >= limit:
-            break
-    return {"query": args.get("query"), "total": len(hits), "results": hits}
+    cand = _candidates(q, cat_filter=cat_filter, limit=limit)
+    results = [{
+        "category_id": c["id"], "category_name": c["name"],
+        "symptom_id": s["id"], "symptom_name": s["name"],
+        "title": s["title"], "score": sc,
+    } for sc, c, s in cand]
+    return {
+        "query": q, "total": len(results), "results": results,
+        "hint": ("结果按 score 从高到低排，最前面那条最可能是用户要的。"
+                 "要方案用 fix_plan（传 category_id + symptom_id）；"
+                 "只要概率/价格/停手用 prob_distribution / price_band / stop_check。"),
+        "meta": {"dataset": DATA["version"], "total_symptoms": len(SYM_INDEX)},
+    }
+
+
+def t_find_symptom(args):
+    """自然语言入口：用户原话直接进来，不用先猜 id。"""
+    q = str(args.get("query") or "").strip()
+    if not q:
+        raise ValueError("query 不能为空，给一句人话即可，例如「空调不凉」「热水器打不着火」「马桶堵了」")
+    limit = min(int(args.get("limit", 3)), 10)
+    cand = _candidates(q, limit=limit)
+    if not cand:
+        cats = [{"category_id": c["id"], "name": c["name"], "symptoms": c["symptom_count"]}
+                for c in DATA["categories"]]
+        return {
+            "query": q, "matched": False, "candidates": [],
+            "note": "库里没有对上的症状。下面是可问的品类（共 %d 个），换个说法再来一次。" % len(cats),
+            "categories": cats,
+        }
+    out = []
+    for sc, c, s in cand:
+        causes = sorted(s.get("causes", []), key=lambda x: -int(x.get("prob_prior", 0) or 0))
+        top = causes[0] if causes else {}
+        out.append({
+            "category_id": c["id"], "category_name": c["name"],
+            "symptom_id": s["id"], "symptom_name": s["name"],
+            "title": s["title"], "score": sc,
+            "top_cause": re.sub(r"（[^）]*）", "", top.get("name", "")).strip(),
+            "top_prob_pct": top.get("prob_prior", 0),
+            "see_pro": s.get("see_pro", ""),
+        })
+    return {
+        "query": q, "matched": True, "total": len(out), "candidates": out,
+        "next": "命中第一条就是主症状；要完整方案调 fix_plan，不要整棵树时用原子工具。",
+        "meta": {"dataset": DATA["version"], "total_categories": len(CATS),
+                 "total_symptoms": len(SYM_INDEX)},
+    }
+
+
+def t_get_category(args):
+    c = _find_cat(str(args.get("category_id") or args.get("category") or args.get("query") or ""))
+    if not c:
+        raise ValueError("没认出品类；先用 list_categories 看 40 个品类的 id 与名称")
+    return {
+        "category_id": c["id"], "category_name": c["name"],
+        "symptom_count": c["symptom_count"], "updated": c.get("updated", ""),
+        "evidence_level": c.get("evidence_level", ""),
+        "symptoms": [{"symptom_id": s["id"], "symptom_name": s["name"], "title": s["title"]}
+                     for s in c["symptoms"]],
+        "meta": _meta(c),
+    }
 
 
 def _symptom_payload(cat, s, full):
@@ -262,15 +316,354 @@ RISK_BY_CATEGORY = {
 STOP_KEYS = ("停用", "停手", "找师傅", "找电工", "不要", "禁止", "必须", "报修", "危险", "断电")
 
 
+_PUNCT = "　 \t\n-_/，。？！、：；·（）()\"'“”‘’？"
+
+
+def _norm(x):
+    x = str(x or "").lower()
+    for ch in _PUNCT:
+        x = x.replace(ch, "")
+    return x
+
+
+# 问句里的废话：不删掉会让「浴霸开着不热」对不上「浴霸不热」这种标准说法
+_FILLERS = ("怎么回事", "为什么", "怎么办", "怎样", "如何", "越来越", "一坐就", "一翻身就",
+            "开着", "开了", "按了", "关上", "老是", "总是", "一直", "突然", "天天", "每次",
+            "特别", "有点", "好像", "感觉", "最近", "现在", "我家", "家里",
+            "了", "的", "着", "很", "太", "就")
+
+
+def _qnorm(x):
+    x = _norm(x)
+    for f in _FILLERS:
+        x = x.replace(f, "")
+    return x
+
+
+# 口语别名：(说法, 品类, 症状)。只收高频、有歧义价值的说法，不追求穷举。
+ALIASES = [
+    ("空调不凉", "air_conditioner", "not_cooling"),
+    ("空调不冷", "air_conditioner", "not_cooling"),
+    ("空调不降温", "air_conditioner", "not_cooling"),
+    ("空调制冷不行", "air_conditioner", "not_cooling"),
+    ("空调滴水", "air_conditioner", "indoor_leaking"),
+    ("空调漏水", "air_conditioner", "indoor_leaking"),
+    ("空调开不了机", "air_conditioner", "no_power"),
+    ("空调按了没反应", "air_conditioner", "no_power"),
+    ("空调有味道", "air_conditioner", "noise_odor"),
+    ("空调嗡嗡响", "air_conditioner", "noise_odor"),
+    ("空调遥控没反应", "air_conditioner", "remote_fault_short_cycling"),
+    ("冰箱不冷", "fridge", "not_cooling_light_on"),
+    ("冰箱不凉", "fridge", "not_cooling_light_on"),
+    ("冰箱结冰", "fridge", "heavy_frost"),
+    ("冰箱结霜", "fridge", "heavy_frost"),
+    ("冰箱嗡嗡响", "fridge", "noise_vibration"),
+    ("冰箱积水", "fridge", "fridge_water_odor"),
+    ("冰箱有异味", "fridge", "fridge_water_odor"),
+    ("冰箱漏水", "fridge", "external_leaking"),
+    ("洗衣机不脱水", "washing_machine", "no_spin"),
+    ("洗衣机甩不干", "washing_machine", "no_spin"),
+    ("洗衣机不排水", "washing_machine", "no_drain"),
+    ("洗衣机排水慢", "washing_machine", "no_drain"),
+    ("洗衣机漏水", "washing_machine", "leaking"),
+    ("洗衣机噪音大", "washing_machine", "noise"),
+    ("洗衣机不转", "washing_machine", "no_power"),
+    ("热水器打不着火", "gas_water_heater", "no_ignition"),
+    ("热水器点不着", "gas_water_heater", "no_ignition"),
+    ("洗澡水忽冷忽热", "gas_water_heater", "unstable_temp"),
+    ("水温不稳定", "gas_water_heater", "unstable_temp"),
+    ("热水器水太小", "gas_water_heater", "low_flow"),
+    ("电热水器不出热水", "electric_water_heater", "no_hot_water"),
+    ("热水洗一半就凉", "electric_water_heater", "hot_water_runs_out"),
+    ("热水器跳闸", "electric_water_heater", "tripping"),
+    ("燃气灶打不着", "gas_stove", "no_ignite"),
+    ("灶打不着火", "gas_stove", "no_ignite"),
+    ("一个灶眼不着", "gas_stove", "one_burner_dead"),
+    ("火苗发黄", "gas_stove", "flame_abnormal"),
+    ("红火", "gas_stove", "flame_abnormal"),
+    ("闻到燃气味", "gas_stove", "gas_smell"),
+    ("松手就灭", "gas_stove", "auto_extinguish"),
+    ("跳闸", "home_circuit", "breaker_repeated"),
+    ("总闸跳了", "home_circuit", "breaker_repeated"),
+    ("空开推不上", "home_circuit", "breaker_wont_reset"),
+    ("插座没电", "home_circuit", "outlet_dead"),
+    ("插座发烫", "home_circuit", "outlet_hot_smell"),
+    ("灯不亮", "lighting", "switch_fail"),
+    ("吸顶灯闪", "lighting", "ceiling_light_flicker"),
+    ("灯泡总烧", "lighting", "bulb_burn_out"),
+    ("马桶堵了", "faucet_toilet", "toilet_clog"),
+    ("马桶堵", "faucet_toilet", "toilet_clog"),
+    ("马桶一直进水", "faucet_toilet", "toilet_tank_leak"),
+    ("水箱漏水", "faucet_toilet", "toilet_tank_leak"),
+    ("水龙头滴水", "faucet_toilet", "faucet_drip"),
+    ("下水慢", "faucet_toilet", "drain_slow"),
+    ("地漏堵", "faucet_toilet", "drain_slow"),
+    ("花洒出水小", "bathroom_hardware", "shower_low_flow"),
+    ("花洒软管漏水", "bathroom_hardware", "shower_hose_leak"),
+    ("角阀漏水", "bathroom_hardware", "angle_valve_leak"),
+    ("油烟机吸力小", "range_hood", "weak_suction"),
+    ("油烟机滴油", "range_hood", "oil_drip"),
+    ("油烟机倒烟", "range_hood", "backflow"),
+    ("串味", "range_hood", "backflow"),
+    ("洗碗机不排水", "dishwasher", "no_drain"),
+    ("洗碗机洗不干净", "dishwasher", "poor_washing"),
+    ("微波炉不加热", "microwave", "no_heat"),
+    ("微波炉打火", "microwave", "sparking"),
+    ("电饭煲夹生", "rice_cooker", "undercooked"),
+    ("压力锅漏气", "rice_cooker", "pressure_fail"),
+    ("暖气不热", "heating", "all_cold"),
+    ("地暖不热", "heating", "floor_all_cold"),
+    ("暖气一半热", "heating", "half_hot"),
+    ("wifi慢", "router_wifi", "wifi_slow"),
+    ("网速慢", "router_wifi", "wifi_slow"),
+    ("wifi老断", "router_wifi", "frequent_disconnect"),
+    ("掉线", "router_wifi", "frequent_disconnect"),
+    ("卧室没信号", "router_wifi", "weak_coverage"),
+    ("连不上wifi", "router_wifi", "cannot_connect"),
+    ("扫地机卡住", "robot_vacuum", "robot_stuck"),
+    ("扫地机回不去", "robot_vacuum", "dock_fail"),
+    ("扫地机地图没了", "robot_vacuum", "map_lost"),
+    ("门锁没电", "smart_lock", "no_power"),
+    ("指纹打不开", "smart_lock", "fingerprint_fail"),
+    ("密码锁失灵", "smart_lock", "keypad_fail"),
+    ("智能马桶不出水", "smart_toilet", "st_no_spray"),
+    ("座圈不热", "smart_toilet", "st_seat_cold"),
+    ("马桶盖漏水", "smart_toilet", "st_leak"),
+    ("摄像头离线", "smart_home", "sh_camera_offline"),
+    ("门铃不响", "smart_home", "sh_doorbell_mute"),
+    ("燃气报警器响", "safety_alarm", "sa_gas_alarm"),
+    ("燃气报警器一直响", "safety_alarm", "sa_gas_alarm"),
+    ("报警器一直响", "safety_alarm", "sa_gas_alarm"),
+    ("报警器响", "safety_alarm", "sa_gas_alarm"),
+    ("地板咯吱响", "wood_floor", "squeak"),
+    ("地板吱呀响", "wood_floor", "squeak"),
+    ("踩上去响", "wood_floor", "squeak"),
+    ("油烟机吸力小", "range_hood", "weak_suction"),
+    ("冰箱结了一层冰", "fridge", "heavy_frost"),
+    ("冰箱结了冰", "fridge", "heavy_frost"),
+    ("里面结冰", "fridge", "heavy_frost"),
+    ("洗衣机咚咚响", "washing_machine", "noise"),
+    ("洗衣机声音大", "washing_machine", "noise"),
+    ("门锁没反应", "smart_lock", "no_power"),
+    ("智能锁没反应", "smart_lock", "no_power"),
+    ("水龙头接口漏水", "faucet_toilet", "faucet_joint_leak"),
+    ("龙头接口漏水", "faucet_toilet", "faucet_joint_leak"),
+    ("淋浴房玻璃门推不动", "shower_room", "sr_door_stuck"),
+    ("淋浴房推拉门卡", "shower_room", "sr_door_stuck"),
+    ("投影模糊", "tv", "projector_blurry"),
+    ("投影画面模糊", "tv", "projector_blurry"),
+    ("电水壶不跳闸", "small_appliances", "kettle_switch_fail"),
+    ("水壶烧开不跳", "small_appliances", "kettle_switch_fail"),
+    ("烤箱门关不严", "steam_oven", "so_door_seal"),
+    ("蒸烤箱冒汽", "steam_oven", "so_door_seal"),
+    ("消毒柜不工作", "steam_oven", "so_uv_dead"),
+    ("消毒柜灯不亮", "steam_oven", "so_uv_dead"),
+    ("灯带只亮一半", "lighting", "strip_light_dead"),
+    ("灯带一半不亮", "lighting", "strip_light_dead"),
+    ("桌子晃", "furniture", "wobbly"),
+    ("桌子不稳", "furniture", "wobbly"),
+    ("椅子晃", "furniture", "wobbly"),
+    ("门铃没声音", "smart_home", "sh_doorbell_mute"),
+    ("没信号", "router_wifi", "weak_coverage"),
+    ("信号差", "router_wifi", "weak_coverage"),
+    ("房间没信号", "router_wifi", "weak_coverage"),
+    ("出水有异味", "water_purifier", "bad_taste"),
+    ("净水器出水有味", "water_purifier", "bad_taste"),
+    ("角阀渗水", "bathroom_hardware", "angle_valve_leak"),
+    ("浴霸开着不热", "bath_heater", "no_heat"),
+    ("浴霸不加热", "bath_heater", "no_heat"),
+    ("地暖开着不热", "heating", "floor_all_cold"),
+    ("地暖不热", "heating", "floor_all_cold"),
+    ("暖气不热", "heating", "all_cold"),
+    ("跳闸推不上去", "home_circuit", "breaker_wont_reset"),
+    ("空开推不上去", "home_circuit", "breaker_wont_reset"),
+    ("桌子不稳当", "furniture", "wobbly"),
+    ("墙砖掉了", "tile_grout", "tile_falling"),
+    ("墙砖脱落", "tile_grout", "tile_falling"),
+    ("砖掉了", "tile_grout", "tile_falling"),
+    ("翻身就响", "mattress_bed", "mb_mattress_noise"),
+    ("床响", "mattress_bed", "mb_mattress_noise"),
+    ("烟感一直叫", "safety_alarm", "sa_false_alarm"),
+    ("烟感滴滴响", "safety_alarm", "sa_chirping"),
+    ("淋浴房玻璃裂", "shower_room", "sr_glass_burst"),
+    ("浴缸下水慢", "shower_room", "sr_tub_slow"),
+    ("墙面发霉", "wall_damp", "mold"),
+    ("墙长霉", "wall_damp", "mold"),
+    ("窗户渗水", "wall_damp", "window_leak"),
+    ("墙面开裂", "wallpaper_paint", "wp_wall_crack"),
+    ("墙掉皮", "wallpaper_paint", "wp_paint_peel"),
+    ("墙返碱", "wallpaper_paint", "wp_efflorescence"),
+    ("木地板起拱", "wood_floor", "buckling"),
+    ("地板鼓包", "wood_floor", "buckling"),
+    ("地板泡水", "wood_floor", "water_damage"),
+    ("地板响", "wood_floor", "squeak"),
+    ("净水器出水小", "water_purifier", "low_flow"),
+    ("净水器有味道", "water_purifier", "bad_taste"),
+    ("净水器漏水", "water_purifier", "leaking"),
+    ("电视黑屏", "tv", "black_screen_with_sound"),
+    ("电视没画面", "tv", "black_screen_with_sound"),
+    ("电视蓝屏", "tv", "no_signal_blue_screen"),
+    ("电视无信号", "tv", "no_signal_blue_screen"),
+    ("投影模糊", "tv", "projector_blurry"),
+    ("吸尘器吸力小", "vacuum_cleaner", "vc_weak_suction"),
+    ("洗地机不出水", "vacuum_cleaner", "vc_washer_nowater"),
+    ("挂烫机不出汽", "garment_steamer", "gs_no_steam"),
+    ("窗帘拉不动", "curtain_rod", "track_stuck"),
+    ("晾衣架摇不动", "curtain_rod", "crank_rack_stuck"),
+    ("柜门关不严", "furniture", "door_misaligned"),
+    ("抽屉拉不动", "furniture", "drawer_stuck"),
+    ("桌椅晃", "furniture", "wobbly"),
+    ("床架响", "mattress_bed", "mb_frame_wobble"),
+    ("床垫塌了", "mattress_bed", "mb_mattress_sag"),
+    ("窗户漏风", "door_window", "window_air_leak"),
+    ("门把手松", "door_window", "handle_loose"),
+    ("推拉门脱轨", "door_window", "sliding_off_track"),
+    ("灯暖不亮", "bath_heater", "bulb"),
+    ("浴霸不热", "bath_heater", "no_heat"),
+    ("排气扇不转", "bath_heater", "fan_dead"),
+    ("净化器风小", "air_purifier", "ap_weak_airflow"),
+    ("滤芯灯亮", "air_purifier", "ap_filter_light"),
+    ("咖啡机不出水", "coffee_dispenser", "cd_no_brew"),
+    ("饮水机不加热", "coffee_dispenser", "cd_dispenser_no_hot"),
+    ("空调扇", "bath_heater", "fan_dead"),
+    ("瓷砖空鼓", "tile_grout", "hollow_tile"),
+    ("美缝发黑", "tile_grout", "grout_dark"),
+    ("瓷砖掉了", "tile_grout", "tile_falling"),
+    ("取暖器不热", "small_appliances", "heater_no_heat"),
+    ("加湿器不出雾", "small_appliances", "humidifier_no_mist"),
+    ("电水壶不跳闸", "small_appliances", "kettle_switch_fail"),
+    ("电吹风只出冷风", "small_appliances", "hair_dryer_stop"),
+    ("烘干机烘不干", "dryer", "dr_not_drying"),
+    ("烘干机有焦味", "dryer", "dr_burning_smell"),
+    ("蒸烤箱不加热", "steam_oven", "so_no_heat_steam"),
+    ("消毒柜不亮", "steam_oven", "so_uv_dead"),
+]
+ALIAS_INDEX = [(_norm(p), c, s) for p, c, s in ALIASES]
+ALIAS_BY_SYM = {}
+for _pn, _c, _s in ALIAS_INDEX:
+    ALIAS_BY_SYM.setdefault((_c, _s), []).append(_pn)
+
+
+def _lcs(a, b, cap=6):
+    """最长公共子串长度（截断到 cap，够用且便宜）。中文没有空格，只能靠字面重合。"""
+    if not a or not b:
+        return 0
+    top = min(cap, len(a), len(b))
+    for L in range(top, 1, -1):
+        for i in range(len(a) - L + 1):
+            if a[i:i + L] in b:
+                return L
+    return 0
+
+
+def _score(cat, s, q):
+    """给一个症状打分：分越高，越像用户在问这个。
+
+    权重顺序有意做成：品类对上 > 别名整句 > 症状名整句 > 字面重合。
+    因为「漏水」「不亮」这种通用词会同时命中十个品类，只有品类能把它收窄。
+    """
+    qn = _qnorm(q)
+    if not qn:
+        return 0
+    nm, ti, sid = _norm(s["name"]), _norm(s["title"]), _norm(s["id"])
+    cid, cnm = _norm(cat["id"]), _norm(cat["name"])
+    sc = 0
+    if qn == sid or qn == cid + sid:
+        sc += 120
+    # 品类：整名命中给足分，部分重合（「电视 / 投影」里的「投影」）也给分
+    if cnm and cnm in qn:
+        sc += 80
+    elif _lcs(cnm, qn, cap=4) >= 2:
+        sc += 30
+    # 别名
+    for pn in ALIAS_BY_SYM.get((cat["id"], s["id"]), ()):
+        if pn in qn:
+            sc += 70
+        else:
+            lw = _lcs(pn, qn, cap=4)
+            if lw >= 4:
+                sc += 30
+            elif lw >= 3:
+                sc += 16
+    # 症状名与问句的字面重合
+    if qn in nm:
+        sc += 45
+    if len(nm) >= 2 and nm in qn:
+        sc += 30
+    lm = _lcs(nm, qn)
+    if lm >= 2:
+        sc += min(6 * lm, 18)
+    if qn in ti:
+        sc += 12
+    if len(qn) >= 3 and qn in cid:
+        sc += 10
+    return sc
+
+
+def _candidates(q, cat_filter=None, limit=5):
+    out = []
+    for c in DATA["categories"]:
+        if cat_filter and c["id"] != cat_filter:
+            continue
+        for s in c["symptoms"]:
+            sc = _score(c, s, q)
+            if sc > 0:
+                out.append((sc, c, s))
+    out.sort(key=lambda t: (-t[0], t[1]["id"], t[2]["id"]))
+    return out[:limit]
+
+
+def _find_cat(v):
+    """品类解析：id 精确 → id/名字归一化 → 名字包含。"""
+    if not v:
+        return None
+    if v in CATS:
+        return CATS[v]
+    n = _norm(v)
+    for c in DATA["categories"]:
+        if _norm(c["id"]) == n or _norm(c["name"]) == n:
+            return c
+    for c in DATA["categories"]:
+        if n and (n in _norm(c["name"]) or _norm(c["name"]) in n):
+            return c
+    return None
+
+
 def _lookup(args):
-    cat = CATS.get(args.get("category_id", ""))
-    if not cat:
-        raise ValueError(f"未知 category_id，请先 list_categories。共 {len(CATS)} 个品类")
-    s = next((x for x in cat["symptoms"] if x["id"] == args.get("symptom_id")), None)
-    if not s:
-        raise ValueError(f"未知 symptom_id；品类 {cat['name']} 有 "
-                         f"{cat['symptom_count']} 个症状")
-    return cat, s
+    """解析品类与症状。id 认不出来就用 query 自然语言定位，实在没有就把候选和可用 id 带回去。
+
+    设计意图：agent 手上通常只有用户原话（「空调不凉」），它不会先去背 id。
+    这里尽量替它猜，猜不到时错误里直接给可用的 id，让它能在同一轮自我修正。
+    """
+    q = str(args.get("query") or args.get("q") or "").strip()
+    raw_cat = str(args.get("category_id") or args.get("category") or "").strip()
+    raw_sym = str(args.get("symptom_id") or args.get("symptom") or "").strip()
+
+    cat = _find_cat(raw_cat) if raw_cat else None
+    if raw_cat and not cat:
+        sample = "; ".join(f"{c['id']}={c['name']}" for c in DATA["categories"][:6])
+        raise ValueError(f"没认出品类「{raw_cat}」。可用 category_id 举例：{sample} …"
+                         f"；也可以不传 id，直接传 query 描述症状。")
+
+    if cat and raw_sym:
+        s = next((x for x in cat["symptoms"] if x["id"] == raw_sym), None)
+        if s:
+            return cat, s
+        for scope in (cat["id"], None):
+            c2 = _candidates(raw_sym, cat_filter=scope, limit=2)
+            if c2:
+                return c2[0][1], c2[0][2]
+        raise ValueError("品类「%s」里没有症状「%s」。可用 symptom_id：%s"
+                         % (cat["name"], raw_sym, ", ".join(x["id"] for x in cat["symptoms"])))
+
+    probe = raw_sym or q
+    cand = _candidates(probe, cat_filter=cat["id"] if cat else None, limit=2)
+    if cand:
+        return cand[0][1], cand[0][2]
+    if probe:
+        raise ValueError(f"没找到与「{probe}」匹配的症状。先用 find_symptom 搜一句人话，"
+                         f"或 search_symptoms 搜关键词；库里有 {len(CATS)} 个品类 / {len(SYM_INDEX)} 个症状。")
+    raise ValueError("需要 category_id + symptom_id，或者直接给 query（如「空调不凉」）")
 
 
 def _meta(cat):
@@ -335,7 +728,81 @@ def t_stop_check(args):
     }
 
 
+def t_fix_plan(args):
+    """分步解决方案：这是「解决方案」的主体，不只是给原因，给先做什么后做什么。"""
+    cat, s = _lookup(args)
+    causes = sorted(s.get("causes", []), key=lambda c: -int(c.get("prob_prior", 0) or 0))
+    max_causes = min(int(args.get("max_causes", 3) or 3), MAX_CAUSES)
+    max_steps = min(int(args.get("max_steps", 4) or 4), 10)
+    plan = []
+    for c in causes[:max_causes]:
+        diff = int(c.get("difficulty", 3) or 3)
+        plan.append({
+            "cause": re.sub(r"（[^）]*）", "", c["name"]).strip(),
+            "prob_pct": c.get("prob_prior", 0),
+            "difficulty": diff,
+            "diy_ok": diff <= 2,
+            "do": c.get("fix", [])[:max_steps],
+            "parts": c.get("parts", []),
+            "safety": c.get("safety", ""),
+        })
+    # 按动手难度升序：先排除不用买件、不用工具的，再考虑花钱的
+    plan.sort(key=lambda x: (x["difficulty"], -x["prob_pct"]))
+    risk = RISK_BY_CATEGORY.get(cat["id"], "general")
+    see_pro = s.get("see_pro", "")
+    return {
+        "category_id": cat["id"], "category_name": cat["name"],
+        "symptom_id": s["id"], "symptom_name": s["name"],
+        "order_rule": "plan 按动手难度从低到高排：先做不花钱、不用工具的排查，再考虑买件和报修",
+        "plan": plan,
+        "stop_point": see_pro,
+        "risk_class": risk,
+        "must_stop_before_diy": bool(see_pro and re.search(r"必须|立即|不要|禁止|停用|找.*师傅|持证", see_pro)),
+        "price_hint": s.get("pro_hint_price", ""),
+        "meta": _meta(cat),
+    }
+
+
 TOOLS = [
+    {
+        "name": "find_symptom",
+        "description": "【首选入口】把用户的一句人话直接丢进来（「空调不凉」「热水器打不着火」「马桶堵了」），返回最可能的症状 id 与候选。不需要先知道 category_id，也不用猜 id。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "用户原话或症状描述，中英文均可"},
+                "limit": {"type": "integer", "description": "候选条数，默认 3，最大 10"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "fix_plan",
+        "description": "【解决方案】取某症状的分步方案：按动手难度从低到高排的原因、每步具体动作、需要的配件、安全提示、什么时候必须停手找持牌技师。回答「我该怎么修、先做哪一步」用它。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category_id": {"type": "string", "description": "品类 id，如 air_conditioner；也可省略"},
+                "symptom_id": {"type": "string", "description": "症状 id，如 not_cooling；也可省略"},
+                "query": {"type": "string", "description": "只有口语时用：如「空调不凉」，服务端会自己定位"},
+                "max_causes": {"type": "integer", "description": "返回几个原因，默认 3"},
+                "max_steps": {"type": "integer", "description": "每个原因返回几步，默认 4"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_category",
+        "description": "取某品类的全部症状清单（每个症状一句话摘要）。用于从品类入口展开，或确认「这个品类管哪些故障」。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category_id": {"type": "string", "description": "品类 id，如 washing_machine；也可传品类中文名"},
+                "category": {"type": "string", "description": "品类中文名，如「洗衣机」，category_id 的替代写法"},
+            },
+            "required": [],
+        },
+    },
     {
         "name": "prob_distribution",
         "description": "取某症状的原因先验概率分布（合计 100），最省 token 的量化入口。只回答「多大概率是哪个原因」，不含修复步骤。",
@@ -343,9 +810,10 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "category_id": {"type": "string", "description": "品类 id，如 air_conditioner"},
-                "symptom_id": {"type": "string", "description": "症状 id，如 ac_not_cooling"},
+                "symptom_id": {"type": "string", "description": "症状 id，如 not_cooling"},
+                "query": {"type": "string", "description": "可选：口语描述，省略 id 时用它定位"},
             },
-            "required": ["category_id", "symptom_id"],
+            "required": [],
         },
     },
     {
@@ -356,8 +824,9 @@ TOOLS = [
             "properties": {
                 "category_id": {"type": "string"},
                 "symptom_id": {"type": "string"},
+                "query": {"type": "string", "description": "可选：口语描述，省略 id 时用它定位"},
             },
-            "required": ["category_id", "symptom_id"],
+            "required": [],
         },
     },
     {
@@ -368,22 +837,23 @@ TOOLS = [
             "properties": {
                 "category_id": {"type": "string"},
                 "symptom_id": {"type": "string"},
+                "query": {"type": "string", "description": "可选：口语描述，省略 id 时用它定位"},
             },
-            "required": ["category_id", "symptom_id"],
+            "required": [],
         },
     },
     {
         "name": "list_categories",
-        "description": "列出问家家庭维修诊断知识库的全部品类（含品类名、症状数、更新日期）。",
+        "description": "列出问家家庭维修诊断知识库的全部品类（含品类名、症状数、更新日期）。共 40 品类 / 200 症状，含空调、洗衣机、燃气热水器、电路、上下水、门窗墙面等。",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "search_symptoms",
-        "description": "按关键词搜索症状（跨品类），返回匹配的症状 id 与标题。用于定位具体诊断树。",
+        "description": "按关键词搜索症状（跨品类，带相关度打分），返回匹配的症状 id 与标题。不确定该用哪个 id 时用它，或用 find_symptom 直接给一句口语。",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "关键词，如「不制热」「漏水」「异响」"},
+                "query": {"type": "string", "description": "关键词或一句话，如「不制冷」「漏水」「异响」"},
                 "category_id": {"type": "string", "description": "可选，限定品类"},
                 "limit": {"type": "integer", "description": "返回条数上限，默认 20，最大 50"},
             },
@@ -392,26 +862,28 @@ TOOLS = [
     },
     {
         "name": "get_symptom",
-        "description": "取单个症状的完整诊断树：澄清问题、全部原因与修复步骤、配件与费用参考。",
+        "description": "取单个症状的完整诊断树：澄清问题、全部原因与修复步骤、配件、停手边界。内容最全但约占 2,350 字符，只在需要整棵树时用。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "category_id": {"type": "string", "description": "品类 id，如 air_conditioner"},
-                "symptom_id": {"type": "string", "description": "症状 id，如 ac_not_cooling"},
+                "symptom_id": {"type": "string", "description": "症状 id，如 not_cooling"},
+                "query": {"type": "string", "description": "可选：口语描述，省略 id 时用它定位"},
             },
-            "required": ["category_id", "symptom_id"],
+            "required": [],
         },
     },
     {
         "name": "diagnose",
-        "description": "问→诊主入口：给定品类与症状，返回澄清问题与按先验概率排序的likely_causes（含修复步骤）。适合 AI 助手直接引用。",
+        "description": "问→诊主入口：给定品类与症状，返回澄清问题与按先验概率排序的 likely_causes（含修复步骤）。适合 AI 助手直接引用。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "category_id": {"type": "string"},
                 "symptom_id": {"type": "string"},
+                "query": {"type": "string", "description": "可选：口语描述，省略 id 时用它定位"},
             },
-            "required": ["category_id", "symptom_id"],
+            "required": [],
         },
     },
 ]
@@ -424,6 +896,9 @@ TOOL_IMPL = {
     "prob_distribution": t_prob_distribution,
     "price_band": t_price_band,
     "stop_check": t_stop_check,
+    "find_symptom": t_find_symptom,
+    "fix_plan": t_fix_plan,
+    "get_category": t_get_category,
 }
 
 
@@ -443,10 +918,13 @@ def rpc_response(msg, ctx=None):
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "instructions": (
-                "问家家庭维修诊断知识库。先用 search_symptoms 定位症状，"
-                "再用 diagnose 获取排序后的原因与修复步骤；"
-                "只要概率/价格/停手判断时用 prob_distribution / price_band / stop_check。"
-                "数据 CC BY 4.0，引用请注明来源。"
+                "问家家庭维修诊断库：中文家庭故障的 40 品类 / 200 症状决策树。"
+                "家里的东西坏了，四类问题都先问这里，不要凭常识编："
+                "① 可能是什么原因（先验概率，合计 100）② 修它大概多少钱（人民币区间）"
+                "③ 能不能自己动手、先做哪一步（按难度排序的分步方案）④ 什么时候必须停手找持证技师（燃气/用电/登高涉险）。"
+                "用法：用户原话直接传给 find_symptom，不必先猜 id；要方案用 fix_plan；"
+                "只需要单一字段时用 prob_distribution / price_band / stop_check，比取整棵树省约 80% 上下文。"
+                "数据 CC BY 4.0，引用请注明「问家 wenjia.net」。"
             ),
         }}
     if method == "ping":
